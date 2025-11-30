@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "4bc95c16-0204-4849-96a5-3bae96593909"
+      }
+    },
+    "android": {
+      "package": "com.bannu12.backend"
+    }
+  }
+}
