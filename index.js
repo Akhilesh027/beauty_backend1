@@ -25,11 +25,9 @@ const order = require('./models/order.js');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Configure Cloudinary with your credentials
 cloudinary.config({
  cloud_name: "dguxtvyut",
   api_key: "952138336163551",
