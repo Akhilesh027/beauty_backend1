@@ -38,7 +38,7 @@ cloudinary.config({
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
-    folder: 'Images', // Folder name in Cloudinary
+    folder: 'Images', 
     allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
     transformation: [{ width: 800, height: 800, crop: 'limit' }],
   },
@@ -55,23 +55,84 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://akhileshreddy811_db_u
 .then(() => console.log('MongoDB connected successfully'))
 .catch(err => console.log(err));
 
-// Routes
-// Example referral code generator (use your own if needed)
-async function generateUniqueReferralCode(baseName = 'USR') {
-  const prefix = ('' + baseName).replace(/[^a-zA-Z]/g, '').slice(0, 3).toUpperCase() || 'USR';
-  let code;
-  let exists = true;
-  // try until unique (rare collision)
-  do {
-    code = prefix + Math.random().toString(36).substring(2, 7).toUpperCase();
-    exists = await User.exists({ referralCode: code });
-  } while (exists);
-  return code;
-}
-function generateReferralCode(name) {
-  return (name.substring(0, 3) + Math.random().toString(36).substring(2, 6)).toUpperCase();
+const authenticateToken = async (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: "Access denied. No token provided."
+      });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'BANNU9');
+    req.userId = decoded.id;
+    next();
+  } catch (err) {
+    if (err.name === 'JsonWebTokenError') {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid token"
+      });
+    }
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({
+        success: false,
+        message: "Token expired"
+      });
+    }
+    res.status(500).json({
+      success: false,
+      message: "Server error"
+    });
+  }
+};
+
+const authenticateAdmin = async (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: "Access denied. No token provided."
+      });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'BANNU9');
+    const user = await User.findById(decoded.id);
+    
+    if (!user || !user.isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. Admin only."
+      });
+    }
+    
+    req.userId = decoded.id;
+    next();
+  } catch (err) {
+    res.status(401).json({
+      success: false,
+      message: "Authentication failed"
+    });
+  }
+};
+
+// Utility Functions
+
+function generateUniqueReferralCode(name) {
+  const prefix = name.substring(0, 2).toUpperCase(); // 2 chars
+  const random = Math.random().toString(36).substring(2, 5).toUpperCase(); // 3 chars
+  return prefix + random;
 }
 
+// ============================================
+// AUTHENTICATION ENDPOINTS
+// ============================================
+
+// 1. Register User
 app.post("/api/register", async (req, res) => {
   try {
     let { firstName, lastName, email, password, age, gender, referralCode, phone } = req.body;
@@ -98,54 +159,101 @@ app.post("/api/register", async (req, res) => {
       });
     }
 
-    const existingEmail = await User.findOne({ email: email.toLowerCase() });
-    if (existingEmail) return res.status(400).json({ 
-      success: false,
-      message: "Email already exists" 
-    });
+    const existingEmail = await User.findOne({ email: email.toLowerCase().trim() });
+    if (existingEmail) {
+      return res.status(400).json({ 
+        success: false,
+        message: "Email already exists" 
+      });
+    }
 
     if (phone) {
-      const existingPhone = await User.findOne({ phone });
-      if (existingPhone) return res.status(400).json({ 
-        success: false,
-        message: "Phone number already exists" 
-      });
+      const formattedPhone = phone.trim();
+      const existingPhone = await User.findOne({ phone: formattedPhone });
+      if (existingPhone) {
+        return res.status(400).json({ 
+          success: false,
+          message: "Phone number already exists" 
+        });
+      }
     }
 
     const saltRounds = 12;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    const newReferralCode = generateReferralCode(firstName);
+    const newReferralCode = await generateUniqueReferralCode(firstName);
+
+    let referredByUser = null;
+    if (referralCode) {
+      referralCode = referralCode.trim().toUpperCase();
+      referredByUser = await User.findOne({ referralCode });
+      
+      if (referralCode === newReferralCode) {
+        return res.status(400).json({
+          success: false,
+          message: "Cannot use your own referral code"
+        });
+      }
+
+      if (!referredByUser) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid referral code"
+        });
+      }
+    }
 
     const user = new User({
-      firstName,
-      lastName: lastName || "",
-      email: email.toLowerCase(),
+      firstName: firstName.trim(),
+      lastName: lastName ? lastName.trim() : "",
+      email: email.toLowerCase().trim(),
       password: hashedPassword,
       age: age || "",
-      gender: gender || "",
-      phone: phone || "",
+      gender: gender ? gender.trim() : "",
+      phone: phone ? phone.trim() : "",
       phoneVerified: phone ? true : false,
       referralCode: newReferralCode,
-      referredBy: referralCode ? referralCode.toUpperCase() : null,
-      wallet: 0,
+      referredBy: referredByUser ? referredByUser._id : null,
+      referralCodeUsed: referredByUser ? referralCode : null,
+      wallet: 50, // Welcome bonus of 50 coins
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date()
     });
 
     await user.save();
 
     // Reward referrer
-    if (referralCode) {
-      const referrer = await User.findOne({ referralCode: referralCode.toUpperCase() });
-      if (referrer) {
-        referrer.wallet += 100;
-        await referrer.save();
-      }
+    if (referredByUser) {
+      referredByUser.wallet += 100;
+      referredByUser.referralCount = (referredByUser.referralCount || 0) + 1;
+      referredByUser.totalEarned = (referredByUser.totalEarned || 0) + 100;
+      referredByUser.updatedAt = new Date();
+      
+      referredByUser.referrals.push({
+        userId: user._id,
+        email: user.email,
+        date: new Date(),
+        reward: 100,
+        status: 'completed'
+      });
+      
+      await referredByUser.save();
     }
 
-    const token = jwt.sign({ id: user._id }, 'BANNU9', { expiresIn: "7d" });
+    const token = jwt.sign(
+      { 
+        id: user._id,
+        email: user.email,
+        isAdmin: user.isAdmin 
+      }, 
+      process.env.JWT_SECRET || 'BANNU9',
+      { expiresIn: "30d" }
+    );
 
-    res.json({
+    res.status(201).json({
       success: true,
+      message: referredByUser ? "Registration successful with referral bonus!" : "Registration successful!",
       token,
       user: {
         id: user._id,
@@ -156,45 +264,88 @@ app.post("/api/register", async (req, res) => {
         wallet: user.wallet,
         referralCode: user.referralCode,
         referredBy: user.referredBy,
+        referralCodeUsed: user.referralCodeUsed,
         age: user.age,
         gender: user.gender,
+        hasReferralBonus: !!referredByUser,
+        isAdmin: user.isAdmin
       },
     });
 
   } catch (err) {
     console.error("Registration error:", err);
+    
+    if (err.code === 11000) {
+      const field = Object.keys(err.keyValue)[0];
+      return res.status(400).json({
+        success: false,
+        message: `${field.charAt(0).toUpperCase() + field.slice(1)} already exists`
+      });
+    }
+    
+    if (err.name === 'ValidationError') {
+      const messages = Object.values(err.errors).map(val => val.message);
+      return res.status(400).json({
+        success: false,
+        message: messages.join(', ')
+      });
+    }
+    
     res.status(500).json({ 
       success: false,
-      message: "Server error during registration" 
+      message: "Server error during registration"
     });
   }
 });
+
+// 2. Login User
 app.post("/api/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password)
+    if (!email || !password) {
       return res.status(400).json({ 
         success: false,
-        message: "All fields are required" 
+        message: "Email and password are required" 
       });
+    }
 
-    const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) return res.status(400).json({ 
-      success: false,
-      message: "Invalid credentials" 
-    });
+    const user = await User.findOne({ 
+      email: email.toLowerCase().trim(),
+      isActive: true
+    }).select('+password');
+
+    if (!user) {
+      return res.status(401).json({ 
+        success: false,
+        message: "Invalid email or password" 
+      });
+    }
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ 
-      success: false,
-      message: "Invalid credentials" 
-    });
+    if (!isMatch) {
+      return res.status(401).json({ 
+        success: false,
+        message: "Invalid email or password" 
+      });
+    }
 
-    const token = jwt.sign({ id: user._id }, 'BANNU9', { expiresIn: "7d" });
+    user.lastLogin = new Date();
+    await user.save();
+
+    const token = jwt.sign(
+      { 
+        id: user._id,
+        email: user.email,
+        isAdmin: user.isAdmin 
+      }, 
+      process.env.JWT_SECRET || 'BANNU9',
+      { expiresIn: "30d" }
+    );
 
     res.json({
       success: true,
+      message: "Login successful",
       token,
       user: {
         id: user._id,
@@ -203,18 +354,1296 @@ app.post("/api/login", async (req, res) => {
         email: user.email,
         phone: user.phone,
         wallet: user.wallet,
+        referralCode: user.referralCode,
+        referralCount: user.referralCount || 0,
+        age: user.age,
+        gender: user.gender,
+        isAdmin: user.isAdmin,
+        lastLogin: user.lastLogin
       },
     });
 
   } catch (err) {
-    console.error(err);
+    console.error("Login error:", err);
     res.status(500).json({ 
       success: false,
-      message: "Server error" 
+      message: "Server error during login"
     });
   }
 });
 
+// 3. Get Current User Profile
+app.get("/api/user/profile", authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select('-password');
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    res.json({
+      success: true,
+      user
+    });
+  } catch (err) {
+    console.error("Profile error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching profile"
+    });
+  }
+});
+
+// 4. Update User Profile
+app.put("/api/user/profile", authenticateToken, async (req, res) => {
+  try {
+    const { firstName, lastName, phone, age, gender } = req.body;
+    
+    const updateData = {};
+    if (firstName) updateData.firstName = firstName.trim();
+    if (lastName) updateData.lastName = lastName.trim();
+    if (phone) updateData.phone = phone.trim();
+    if (age) updateData.age = age;
+    if (gender) updateData.gender = gender.trim();
+    
+    updateData.updatedAt = new Date();
+
+    const user = await User.findByIdAndUpdate(
+      req.userId,
+      updateData,
+      { new: true, runValidators: true }
+    ).select('-password');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Profile updated successfully",
+      user
+    });
+  } catch (err) {
+    console.error("Update profile error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error updating profile"
+    });
+  }
+});
+
+// 5. Change Password
+app.post("/api/user/change-password", authenticateToken, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Current password and new password are required"
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "New password must be at least 6 characters long"
+      });
+    }
+
+    const user = await User.findById(req.userId).select('+password');
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) {
+      return res.status(400).json({
+        success: false,
+        message: "Current password is incorrect"
+      });
+    }
+
+    const saltRounds = 12;
+    user.password = await bcrypt.hash(newPassword, saltRounds);
+    user.updatedAt = new Date();
+    await user.save();
+
+    res.json({
+      success: true,
+      message: "Password changed successfully"
+    });
+  } catch (err) {
+    console.error("Change password error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error changing password"
+    });
+  }
+});
+
+// ============================================
+// REFERRAL SYSTEM ENDPOINTS
+// ============================================
+
+// 6. Get User's Referral Information
+app.get("/api/user/referral-info", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+    
+    const user = await User.findById(userId).select(
+      'firstName lastName email phone referralCode referralCount wallet totalEarned referrals'
+    );
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    const referralCount = await User.countDocuments({ referredBy: userId });
+    const totalEarned = referralCount * 100;
+    
+    const userRank = await User.countDocuments({
+      referralCount: { $gt: user.referralCount || 0 }
+    }) + 1;
+
+    res.json({
+      success: true,
+      data: {
+        referralCode: user.referralCode,
+        wallet: user.wallet,
+        referralCount: referralCount,
+        totalEarnedFromReferrals: totalEarned,
+        userRank: userRank,
+        userInfo: {
+          firstName: user.firstName,
+          lastName: user.lastName,
+          email: user.email,
+          phone: user.phone
+        },
+        stats: {
+          today: await User.countDocuments({
+            referredBy: userId,
+            createdAt: {
+              $gte: new Date(new Date().setHours(0, 0, 0, 0))
+            }
+          }),
+          thisWeek: await User.countDocuments({
+            referredBy: userId,
+            createdAt: {
+              $gte: new Date(new Date().setDate(new Date().getDate() - 7))
+            }
+          }),
+          thisMonth: await User.countDocuments({
+            referredBy: userId,
+            createdAt: {
+              $gte: new Date(new Date().setDate(new Date().getDate() - 30))
+            }
+          })
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Referral info error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching referral information"
+    });
+  }
+});
+
+// 7. Get Referred Users List
+app.get("/api/user/referred-users", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { page = 1, limit = 20, search = '' } = req.query;
+    const skip = (page - 1) * limit;
+
+    const query = { referredBy: userId };
+    
+    if (search) {
+      query.$or = [
+        { firstName: { $regex: search, $options: 'i' } },
+        { lastName: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const referredUsers = await User.find(query)
+      .select('firstName lastName email phone gender wallet createdAt referralCode')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const total = await User.countDocuments(query);
+    const totalEarned = total * 100;
+
+    res.json({
+      success: true,
+      data: {
+        referredUsers: referredUsers.map((user, index) => ({
+          id: user._id,
+          serialNo: skip + index + 1,
+          name: `${user.firstName} ${user.lastName || ''}`.trim(),
+          email: user.email,
+          phone: user.phone,
+          gender: user.gender,
+          joinedDate: user.createdAt,
+          formattedDate: new Date(user.createdAt).toLocaleDateString('en-US', {
+            day: 'numeric',
+            month: 'short',
+            year: 'numeric'
+          }),
+          daysAgo: Math.floor((new Date() - user.createdAt) / (1000 * 60 * 60 * 24)),
+          earnedCoins: 100,
+          status: user.wallet > 0 ? 'Active' : 'New',
+          hasMadePurchase: user.wallet > 0,
+          userReferralCode: user.referralCode
+        })),
+        pagination: {
+          currentPage: parseInt(page),
+          totalPages: Math.ceil(total / limit),
+          totalItems: total,
+          itemsPerPage: parseInt(limit)
+        },
+        summary: {
+          totalReferrals: total,
+          totalEarned: totalEarned,
+          activeReferrals: referredUsers.filter(u => u.wallet > 0).length,
+          pendingEarnings: referredUsers.filter(u => u.wallet === 0).length * 100
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Referred users error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching referred users"
+    });
+  }
+});
+
+// 8. Get Referral Leaderboard
+app.get("/api/referral-leaderboard", async (req, res) => {
+  try {
+    const { period = 'all', limit = 10 } = req.query;
+    
+    let matchStage = {};
+    
+    if (period === 'today') {
+      matchStage.createdAt = {
+        $gte: new Date(new Date().setHours(0, 0, 0, 0))
+      };
+    } else if (period === 'thisWeek') {
+      matchStage.createdAt = {
+        $gte: new Date(new Date().setDate(new Date().getDate() - 7))
+      };
+    } else if (period === 'thisMonth') {
+      matchStage.createdAt = {
+        $gte: new Date(new Date().setDate(new Date().getDate() - 30))
+      };
+    }
+
+    const leaderboard = await User.aggregate([
+      {
+        $match: {
+          referralCount: { $gt: 0 }
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: 'referredBy',
+          as: 'referrals'
+        }
+      },
+      {
+        $addFields: {
+          referralCount: { $size: '$referrals' },
+          totalEarned: { $multiply: [{ $size: '$referrals' }, 100] }
+        }
+      },
+      {
+        $project: {
+          _id: 1,
+          name: { $concat: ['$firstName', ' ', { $ifNull: ['$lastName', ''] }] },
+          email: 1,
+          phone: 1,
+          referralCode: 1,
+          referralCount: 1,
+          totalEarned: 1,
+          wallet: 1,
+          createdAt: 1
+        }
+      },
+      { $sort: { referralCount: -1, totalEarned: -1 } },
+      { $limit: parseInt(limit) }
+    ]);
+
+    let userRank = null;
+    let userStats = null;
+    
+    const token = req.headers.authorization?.split(' ')[1];
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'BANNU9');
+        const currentUser = await User.findById(decoded.id);
+        
+        if (currentUser) {
+          const userReferralCount = await User.countDocuments({ referredBy: currentUser._id });
+          const userTotalEarned = userReferralCount * 100;
+          
+          const usersAbove = await User.countDocuments({
+            _id: { $ne: currentUser._id },
+            referralCount: { $gt: userReferralCount }
+          });
+          
+          userRank = usersAbove + 1;
+          userStats = {
+            rank: userRank,
+            referralCount: userReferralCount,
+            totalEarned: userTotalEarned,
+            referralCode: currentUser.referralCode
+          };
+        }
+      } catch (err) {
+        // Token verification failed
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        leaderboard: leaderboard.map((user, index) => ({
+          ...user,
+          rank: index + 1,
+          avatarColor: ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'][index % 8]
+        })),
+        period: period,
+        updatedAt: new Date(),
+        userStats: userStats
+      }
+    });
+  } catch (err) {
+    console.error("Leaderboard error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching leaderboard"
+    });
+  }
+});
+
+// 9. Validate Referral Code
+app.get("/api/referral/validate/:code", async (req, res) => {
+  try {
+    const { code } = req.params;
+    
+    if (!code) {
+      return res.status(400).json({
+        success: false,
+        message: "Referral code is required"
+      });
+    }
+
+    const referrer = await User.findOne({ 
+      referralCode: code.toUpperCase().trim() 
+    }).select('firstName lastName email referralCode wallet referralCount');
+
+    if (!referrer) {
+      return res.status(404).json({
+        success: false,
+        isValid: false,
+        message: "Invalid referral code"
+      });
+    }
+
+    res.json({
+      success: true,
+      isValid: true,
+      data: {
+        referrerName: `${referrer.firstName} ${referrer.lastName || ''}`.trim(),
+        referrerEmail: referrer.email,
+        referralCode: referrer.referralCode,
+        referrerStats: {
+          totalReferrals: referrer.referralCount || 0,
+          totalEarned: (referrer.referralCount || 0) * 100,
+          walletBalance: referrer.wallet
+        },
+        bonusInfo: {
+          referrerBonus: 100,
+          refereeBonus: 50,
+          description: "Both you and your friend will get bonus coins!"
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Validate referral error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error validating referral code"
+    });
+  }
+});
+
+// 10. Get Referral Statistics
+app.get("/api/referral/stats", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+    
+    const stats = await User.aggregate([
+      { $match: { referredBy: mongoose.Types.ObjectId(userId) } },
+      {
+        $group: {
+          _id: {
+            year: { $year: '$createdAt' },
+            month: { $month: '$createdAt' },
+            day: { $dayOfMonth: '$createdAt' }
+          },
+          count: { $sum: 1 },
+          totalEarned: { $sum: 100 }
+        }
+      },
+      { $sort: { '_id.year': -1, '_id.month': -1, '_id.day': -1 } },
+      { $limit: 30 }
+    ]);
+
+    const recentReferrals = await User.find({ referredBy: userId })
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .select('firstName lastName email createdAt wallet');
+
+    const totalReferrals = await User.countDocuments({ referredBy: userId });
+    const activeReferrals = await User.countDocuments({ 
+      referredBy: userId, 
+      wallet: { $gt: 0 } 
+    });
+    
+    const conversionRate = totalReferrals > 0 
+      ? Math.round((activeReferrals / totalReferrals) * 100) 
+      : 0;
+
+    res.json({
+      success: true,
+      data: {
+        totalReferrals: totalReferrals,
+        totalEarned: totalReferrals * 100,
+        activeReferrals: activeReferrals,
+        conversionRate: conversionRate,
+        dailyStats: stats,
+        recentReferrals: recentReferrals.map(ref => ({
+          name: `${ref.firstName} ${ref.lastName || ''}`.trim(),
+          email: ref.email,
+          joinedDate: ref.createdAt,
+          hasMadePurchase: ref.wallet > 0,
+          purchaseAmount: ref.wallet
+        })),
+        earningsByPeriod: {
+          today: await User.countDocuments({
+            referredBy: userId,
+            createdAt: {
+              $gte: new Date(new Date().setHours(0, 0, 0, 0))
+            }
+          }) * 100,
+          thisWeek: await User.countDocuments({
+            referredBy: userId,
+            createdAt: {
+              $gte: new Date(new Date().setDate(new Date().getDate() - 7))
+            }
+          }) * 100,
+          thisMonth: await User.countDocuments({
+            referredBy: userId,
+            createdAt: {
+              $gte: new Date(new Date().setDate(new Date().getDate() - 30))
+            }
+          }) * 100
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Referral stats error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching referral statistics"
+    });
+  }
+});
+
+// 11. Generate Shareable Referral Link
+app.post("/api/referral/share-link", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { platform = 'general' } = req.body;
+    
+    const user = await User.findById(userId).select('referralCode firstName lastName');
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    const baseUrl = process.env.APP_URL || 'http://localhost:5000';
+    const referralLink = `${baseUrl}/register?ref=${user.referralCode}`;
+    
+    const messages = {
+      whatsapp: `🌟 Join me on Beauty App! 🌟\n\nUse my referral code: ${user.referralCode}\n\nGet ₹100 bonus when you sign up using this link: ${referralLink}\n\nDownload now and start your beauty journey! 💄`,
+      facebook: `I'm using Beauty App and you should too! Use my referral code ${user.referralCode} to get ₹100 bonus when you sign up. Join me here: ${referralLink}`,
+      instagram: `💄 Beauty App is amazing! Use my code ${user.referralCode} for ₹100 bonus. Link in bio!`,
+      sms: `Join Beauty App! Use my referral code: ${user.referralCode} for ₹100 bonus. Sign up here: ${referralLink}`,
+      general: `Use my referral code ${user.referralCode} on Beauty App to get ₹100 bonus! Sign up here: ${referralLink}`
+    };
+
+    res.json({
+      success: true,
+      data: {
+        referralCode: user.referralCode,
+        referralLink: referralLink,
+        shareMessage: messages[platform] || messages.general,
+        qrCode: `${baseUrl}/api/referral/qr/${user.referralCode}`,
+        shareOptions: {
+          whatsapp: messages.whatsapp,
+          facebook: messages.facebook,
+          instagram: messages.instagram,
+          sms: messages.sms,
+          copyText: `Referral Code: ${user.referralCode}\nLink: ${referralLink}`
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Share link error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error generating share link"
+    });
+  }
+});
+
+// 12. Track Referral Clicks
+app.post("/api/referral/track-click", async (req, res) => {
+  try {
+    const { referralCode, source = 'direct', device = 'mobile' } = req.body;
+    
+    if (!referralCode) {
+      return res.status(400).json({
+        success: false,
+        message: "Referral code is required"
+      });
+    }
+
+    const referrer = await User.findOne({ referralCode: referralCode.toUpperCase() });
+    
+    if (referrer) {
+      referrer.referralClicks = (referrer.referralClicks || 0) + 1;
+      referrer.referralSources = referrer.referralSources || {};
+      referrer.referralSources[source] = (referrer.referralSources[source] || 0) + 1;
+      await referrer.save();
+    }
+
+    res.json({
+      success: true,
+      message: "Click tracked successfully"
+    });
+  } catch (err) {
+    console.error("Track click error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error tracking click"
+    });
+  }
+});
+
+// 13. Get Referral Rewards History
+app.get("/api/referral/rewards-history", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { page = 1, limit = 20 } = req.query;
+    const skip = (page - 1) * limit;
+
+    const user = await User.findById(userId).populate({
+      path: 'referrals.userId',
+      select: 'firstName lastName email'
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    const referrals = user.referrals || [];
+    const total = referrals.length;
+
+    const paginatedReferrals = referrals.slice(skip, skip + parseInt(limit));
+
+    res.json({
+      success: true,
+      data: {
+        rewardsHistory: paginatedReferrals.map((ref, index) => ({
+          id: ref._id || index,
+          serialNo: skip + index + 1,
+          user: ref.userId ? {
+            name: `${ref.userId.firstName} ${ref.userId.lastName || ''}`.trim(),
+            email: ref.userId.email
+          } : { name: 'Unknown User', email: ref.email },
+          rewardAmount: ref.reward || 100,
+          date: ref.date,
+          formattedDate: new Date(ref.date).toLocaleDateString('en-US', {
+            day: 'numeric',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+          }),
+          status: ref.status || 'completed',
+          transactionId: `REF-${ref.date.getTime()}-${index}`
+        })),
+        pagination: {
+          currentPage: parseInt(page),
+          totalPages: Math.ceil(total / limit),
+          totalItems: total,
+          itemsPerPage: parseInt(limit)
+        },
+        summary: {
+          totalRewards: referrals.reduce((sum, ref) => sum + (ref.reward || 0), 0),
+          pendingRewards: referrals.filter(ref => ref.status === 'pending').length * 100,
+          completedRewards: referrals.filter(ref => ref.status === 'completed').length * 100
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Rewards history error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching rewards history"
+    });
+  }
+});
+
+// ============================================
+// WALLET & PAYMENT ENDPOINTS
+// ============================================
+
+// 14. Get Wallet Balance
+app.get("/api/wallet/balance", authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select('wallet totalEarned totalSpent');
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        balance: user.wallet,
+        totalEarned: user.totalEarned || 0,
+        totalSpent: user.totalSpent || 0,
+        availableBalance: user.wallet
+      }
+    });
+  } catch (err) {
+    console.error("Wallet balance error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching wallet balance"
+    });
+  }
+});
+
+// 15. Add Money to Wallet
+app.post("/api/wallet/add", authenticateToken, async (req, res) => {
+  try {
+    const { amount, paymentMethod = 'razorpay' } = req.body;
+    
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid amount is required"
+      });
+    }
+
+    const user = await User.findById(req.userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    // Here you would integrate with payment gateway
+    // For now, just update the wallet
+    user.wallet += amount;
+    user.totalEarned = (user.totalEarned || 0) + amount;
+    user.updatedAt = new Date();
+    await user.save();
+
+    // Create transaction record (you would have a Transaction model)
+    const transactionId = `TXN${Date.now()}${Math.floor(Math.random() * 1000)}`;
+
+    res.json({
+      success: true,
+      message: "Money added to wallet successfully",
+      data: {
+        transactionId: transactionId,
+        amount: amount,
+        newBalance: user.wallet,
+        paymentMethod: paymentMethod,
+        timestamp: new Date()
+      }
+    });
+  } catch (err) {
+    console.error("Add money error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error adding money to wallet"
+    });
+  }
+});
+
+// 16. Get Transaction History
+app.get("/api/wallet/transactions", authenticateToken, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, type = 'all' } = req.query;
+    const skip = (page - 1) * limit;
+
+    // In a real app, you would query from a Transaction model
+    // For now, we'll return sample data
+    const sampleTransactions = [
+      {
+        id: 'TXN123456789',
+        type: 'credit',
+        amount: 100,
+        description: 'Referral Bonus - John Doe',
+        date: new Date(Date.now() - 86400000),
+        status: 'completed'
+      },
+      {
+        id: 'TXN987654321',
+        type: 'debit',
+        amount: 50,
+        description: 'Product Purchase - Lipstick',
+        date: new Date(Date.now() - 172800000),
+        status: 'completed'
+      },
+      {
+        id: 'TXN456789123',
+        type: 'credit',
+        amount: 200,
+        description: 'Wallet Top-up',
+        date: new Date(Date.now() - 259200000),
+        status: 'completed'
+      }
+    ];
+
+    res.json({
+      success: true,
+      data: {
+        transactions: sampleTransactions.slice(skip, skip + parseInt(limit)),
+        pagination: {
+          currentPage: parseInt(page),
+          totalPages: Math.ceil(sampleTransactions.length / limit),
+          totalItems: sampleTransactions.length,
+          itemsPerPage: parseInt(limit)
+        },
+        summary: {
+          totalCredits: sampleTransactions.filter(t => t.type === 'credit').reduce((sum, t) => sum + t.amount, 0),
+          totalDebits: sampleTransactions.filter(t => t.type === 'debit').reduce((sum, t) => sum + t.amount, 0),
+          balance: sampleTransactions.filter(t => t.type === 'credit').reduce((sum, t) => sum + t.amount, 0) -
+                  sampleTransactions.filter(t => t.type === 'debit').reduce((sum, t) => sum + t.amount, 0)
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Transactions error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching transactions"
+    });
+  }
+});
+
+// ============================================
+// ADMIN ENDPOINTS
+// ============================================
+
+// 17. Get All Users (Admin)
+app.get("/api/admin/users", authenticateAdmin, async (req, res) => {
+  try {
+    const { page = 1, limit = 50, search = '', sortBy = 'createdAt', order = 'desc' } = req.query;
+    const skip = (page - 1) * limit;
+    
+    const query = {};
+    
+    if (search) {
+      query.$or = [
+        { firstName: { $regex: search, $options: 'i' } },
+        { lastName: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } },
+        { referralCode: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const sort = {};
+    sort[sortBy] = order === 'desc' ? -1 : 1;
+
+    const users = await User.find(query)
+      .select('-password')
+      .sort(sort)
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const total = await User.countDocuments(query);
+
+    res.json({
+      success: true,
+      data: {
+        users: users.map(user => ({
+          id: user._id,
+          name: `${user.firstName} ${user.lastName || ''}`.trim(),
+          email: user.email,
+          phone: user.phone || 'N/A',
+          referralCode: user.referralCode,
+          wallet: user.wallet,
+          referralCount: user.referralCount,
+          status: user.isActive ? 'Active' : 'Inactive',
+          isAdmin: user.isAdmin,
+          joinedDate: user.createdAt,
+          lastLogin: user.lastLogin
+        })),
+        pagination: {
+          currentPage: parseInt(page),
+          totalPages: Math.ceil(total / limit),
+          totalItems: total,
+          itemsPerPage: parseInt(limit)
+        },
+        stats: {
+          totalUsers: await User.countDocuments(),
+          activeUsers: await User.countDocuments({ isActive: true }),
+          totalAdmins: await User.countDocuments({ isAdmin: true }),
+          totalWalletBalance: await User.aggregate([
+            { $group: { _id: null, total: { $sum: '$wallet' } } }
+          ]).then(result => result[0]?.total || 0)
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Admin users error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching users"
+    });
+  }
+});
+
+// 18. Get All Referrals (Admin)
+app.get("/api/admin/referrals", authenticateAdmin, async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 50,
+      search = '',
+      startDate,
+      endDate,
+      referrerId
+    } = req.query;
+    
+    const skip = (page - 1) * limit;
+    
+    const query = { referredBy: { $ne: null } };
+    
+    if (startDate || endDate) {
+      query.createdAt = {};
+      if (startDate) query.createdAt.$gte = new Date(startDate);
+      if (endDate) query.createdAt.$lte = new Date(endDate);
+    }
+    
+    if (referrerId) {
+      query.referredBy = referrerId;
+    }
+    
+    if (search) {
+      query.$or = [
+        { firstName: { $regex: search, $options: 'i' } },
+        { lastName: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { referralCode: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const referrals = await User.find(query)
+      .populate('referredBy', 'firstName lastName email referralCode')
+      .select('firstName lastName email phone referralCode referredBy wallet createdAt')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    const total = await User.countDocuments(query);
+
+    const totalReferrals = await User.countDocuments({ referredBy: { $ne: null } });
+    const totalEarned = totalReferrals * 100;
+    const uniqueReferrers = await User.distinct('referredBy');
+
+    res.json({
+      success: true,
+      data: {
+        referrals: referrals.map(ref => ({
+          id: ref._id,
+          name: `${ref.firstName} ${ref.lastName || ''}`.trim(),
+          email: ref.email,
+          phone: ref.phone,
+          referralCode: ref.referralCode,
+          referredBy: ref.referredBy ? {
+            id: ref.referredBy._id,
+            name: `${ref.referredBy.firstName} ${ref.referredBy.lastName || ''}`.trim(),
+            email: ref.referredBy.email,
+            referralCode: ref.referredBy.referralCode
+          } : null,
+          wallet: ref.wallet,
+          joinedDate: ref.createdAt,
+          hasMadePurchase: ref.wallet > 0
+        })),
+        pagination: {
+          currentPage: parseInt(page),
+          totalPages: Math.ceil(total / limit),
+          totalItems: total,
+          itemsPerPage: parseInt(limit)
+        },
+        summary: {
+          totalReferrals: totalReferrals,
+          totalEarned: totalEarned,
+          uniqueReferrers: uniqueReferrers.length,
+          averageReferralsPerUser: totalReferrals / (uniqueReferrers.length || 1)
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Admin referrals error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching admin referrals"
+    });
+  }
+});
+
+// 19. Update User Status (Admin)
+app.put("/api/admin/users/:id/status", authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isActive, isAdmin } = req.body;
+    
+    const updateData = {};
+    if (isActive !== undefined) updateData.isActive = isActive;
+    if (isAdmin !== undefined) updateData.isAdmin = isAdmin;
+    
+    updateData.updatedAt = new Date();
+
+    const user = await User.findByIdAndUpdate(
+      id,
+      updateData,
+      { new: true, runValidators: true }
+    ).select('-password');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "User status updated successfully",
+      user
+    });
+  } catch (err) {
+    console.error("Update user status error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error updating user status"
+    });
+  }
+});
+
+// 20. Add/Remove Wallet Balance (Admin)
+app.post("/api/admin/users/:id/wallet", authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { amount, type = 'add', reason = 'Admin adjustment' } = req.body;
+    
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid amount is required"
+      });
+    }
+
+    const user = await User.findById(id);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    if (type === 'add') {
+      user.wallet += amount;
+      user.totalEarned = (user.totalEarned || 0) + amount;
+    } else if (type === 'deduct') {
+      if (user.wallet < amount) {
+        return res.status(400).json({
+          success: false,
+          message: "Insufficient wallet balance"
+        });
+      }
+      user.wallet -= amount;
+      user.totalSpent = (user.totalSpent || 0) + amount;
+    }
+
+    user.updatedAt = new Date();
+    await user.save();
+
+    res.json({
+      success: true,
+      message: `Wallet ${type === 'add' ? 'credited' : 'debited'} successfully`,
+      data: {
+        userId: user._id,
+        name: `${user.firstName} ${user.lastName || ''}`.trim(),
+        type: type,
+        amount: amount,
+        reason: reason,
+        newBalance: user.wallet,
+        timestamp: new Date()
+      }
+    });
+  } catch (err) {
+    console.error("Admin wallet adjustment error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error adjusting wallet balance"
+    });
+  }
+});
+
+// ============================================
+// UTILITY & HEALTH ENDPOINTS
+// ============================================
+
+// 21. Health Check
+app.get("/api/health", (req, res) => {
+  res.json({
+    success: true,
+    message: "Server is running",
+    timestamp: new Date(),
+    uptime: process.uptime(),
+    database: mongoose.connection.readyState === 1 ? "Connected" : "Disconnected",
+    environment: process.env.NODE_ENV || "development"
+  });
+});
+
+// 22. Get Server Stats
+app.get("/api/stats", authenticateAdmin, async (req, res) => {
+  try {
+    const totalUsers = await User.countDocuments();
+    const activeUsers = await User.countDocuments({ isActive: true });
+    const newUsersToday = await User.countDocuments({
+      createdAt: {
+        $gte: new Date(new Date().setHours(0, 0, 0, 0))
+      }
+    });
+    const totalReferrals = await User.countDocuments({ referredBy: { $ne: null } });
+    const totalWalletBalance = await User.aggregate([
+      { $group: { _id: null, total: { $sum: '$wallet' } } }
+    ]).then(result => result[0]?.total || 0);
+    
+    const topReferrers = await User.aggregate([
+      { $match: { referralCount: { $gt: 0 } } },
+      { $sort: { referralCount: -1 } },
+      { $limit: 5 },
+      { $project: { firstName: 1, lastName: 1, referralCount: 1, email: 1 } }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        users: {
+          total: totalUsers,
+          active: activeUsers,
+          newToday: newUsersToday,
+          activePercentage: totalUsers > 0 ? Math.round((activeUsers / totalUsers) * 100) : 0
+        },
+        referrals: {
+          total: totalReferrals,
+          totalEarned: totalReferrals * 100,
+          averagePerUser: totalUsers > 0 ? (totalReferrals / totalUsers).toFixed(2) : 0
+        },
+        wallet: {
+          totalBalance: totalWalletBalance,
+          averageBalance: totalUsers > 0 ? (totalWalletBalance / totalUsers).toFixed(2) : 0
+        },
+        topReferrers: topReferrers,
+        server: {
+          uptime: process.uptime(),
+          memoryUsage: process.memoryUsage(),
+          timestamp: new Date()
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Stats error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching stats"
+    });
+  }
+});
+
+// 23. Reset Password Request
+app.post("/api/auth/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required"
+      });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found with this email"
+      });
+    }
+
+    // Generate reset token
+    const resetToken = jwt.sign(
+      { id: user._id, email: user.email },
+      process.env.JWT_SECRET || 'BANNU9',
+      { expiresIn: '1h' }
+    );
+
+    // In production, send email with reset link
+    // For now, just return the token
+    res.json({
+      success: true,
+      message: "Password reset instructions sent to your email",
+      resetToken: resetToken // In production, don't return this
+    });
+  } catch (err) {
+    console.error("Forgot password error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error processing forgot password"
+    });
+  }
+});
+
+// 24. Reset Password with Token
+app.post("/api/auth/reset-password", async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+    
+    if (!token || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Token and new password are required"
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 6 characters long"
+      });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'BANNU9');
+    const user = await User.findById(decoded.id);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    const saltRounds = 12;
+    user.password = await bcrypt.hash(newPassword, saltRounds);
+    user.updatedAt = new Date();
+    await user.save();
+
+    res.json({
+      success: true,
+      message: "Password reset successfully"
+    });
+  } catch (err) {
+    console.error("Reset password error:", err);
+    if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired token"
+      });
+    }
+    res.status(500).json({
+      success: false,
+      message: "Server error resetting password"
+    });
+  }
+});
+
+// 25. Delete Account
+app.delete("/api/user/account", authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findByIdAndUpdate(
+      req.userId,
+      { isActive: false, updatedAt: new Date() },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Account deactivated successfully"
+    });
+  } catch (err) {
+    console.error("Delete account error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error deactivating account"
+    });
+  }
+});
 app.get('/api/bookings/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -252,94 +1681,94 @@ app.get('/api/referral/code/:userId', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-app.get('/api/referral/stats/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    if (!userId) return res.status(400).json({ message: 'User ID is required' });
+// app.get('/api/referral/stats/:userId', async (req, res) => {
+//   try {
+//     const { userId } = req.params;
+//     if (!userId) return res.status(400).json({ message: 'User ID is required' });
 
-    const referral = await Referral.findOne({ userId });
-    if (!referral) {
-      return res.status(404).json({ message: 'Referral entry not found' });
-    }
+//     const referral = await Referral.findOne({ userId });
+//     if (!referral) {
+//       return res.status(404).json({ message: 'Referral entry not found' });
+//     }
 
-    // Ensure default values if not present
-    const stats = {
-      totalReferrals: referral.totalReferrals || 0,
-      successfulReferrals: referral.successfulReferrals || 0,
-      pendingReferrals: referral.pendingReferrals || 0,
-      earnedCredits: referral.earnedCredits || 0,
-      walletBalance: referral.walletBalance || 0 // if wallet is tracked here
-    };
+//     // Ensure default values if not present
+//     const stats = {
+//       totalReferrals: referral.totalReferrals || 0,
+//       successfulReferrals: referral.successfulReferrals || 0,
+//       pendingReferrals: referral.pendingReferrals || 0,
+//       earnedCredits: referral.earnedCredits || 0,
+//       walletBalance: referral.walletBalance || 0 // if wallet is tracked here
+//     };
 
-    res.json(stats);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-app.get('/api/referral/history/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    if (!userId) return res.status(400).json({ message: 'User ID is required' });
+//     res.json(stats);
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ error: 'Server error' });
+//   }
+// });
+// app.get('/api/referral/history/:userId', async (req, res) => {
+//   try {
+//     const { userId } = req.params;
+//     if (!userId) return res.status(400).json({ message: 'User ID is required' });
 
-    const referral = await Referral.findOne({ userId });
-    if (!referral) {
-      return res.status(404).json({ message: 'Referral entry not found' });
-    }
+//     const referral = await Referral.findOne({ userId });
+//     if (!referral) {
+//       return res.status(404).json({ message: 'Referral entry not found' });
+//     }
 
-    // Ensure history is an array
-    const history = Array.isArray(referral.history) ? referral.history : [];
+//     // Ensure history is an array
+//     const history = Array.isArray(referral.history) ? referral.history : [];
 
-    res.json({ history });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
+//     res.json({ history });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ error: 'Server error' });
+//   }
+// });
 
-app.get('/api/referral-status/:userId', async (req, res) => {
-  try {
-    const requestedUserId = req.params.userId;
-    const authenticatedUserId = req.params.userId;
-
-
-    // Optionally verify the requestedUserId matches authenticatedUserId
-    if (requestedUserId !== authenticatedUserId) {
-      return res.status(403).json({ message: 'Forbidden: Access denied' });
-    }
+// app.get('/api/referral-status/:userId', async (req, res) => {
+//   try {
+//     const requestedUserId = req.params.userId;
+//     const authenticatedUserId = req.params.userId;
 
 
-    // Fetch user from database
-    const user = await User.findById(authenticatedUserId).lean();
-    if (!user) return res.status(404).json({ message: 'User not found' });
+//     // Optionally verify the requestedUserId matches authenticatedUserId
+//     if (requestedUserId !== authenticatedUserId) {
+//       return res.status(403).json({ message: 'Forbidden: Access denied' });
+//     }
 
 
-    // Find users who were referred by this user's referralCode
-    const referredUsers = await User.find({ referredBy: user.referralCode })
-      .select('firstName lastName email coins referralCode')
-      .lean();
+//     // Fetch user from database
+//     const user = await User.findById(authenticatedUserId).lean();
+//     if (!user) return res.status(404).json({ message: 'User not found' });
 
 
-    const referredList = referredUsers.map(u => ({
-      name: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email,
-      email: u.email,
-      earnedCoins: 125 // Or use actual logic if stored per referral
-    }));
+//     // Find users who were referred by this user's referralCode
+//     const referredUsers = await User.find({ referredBy: user.referralCode })
+//       .select('firstName lastName email coins referralCode')
+//       .lean();
 
 
-    res.json({
-      referralCode: user.referralCode,
-      coins: user.coins,
-      referralCount: user.referralCount,
-      referredUsers: referredList
-    });
+//     const referredList = referredUsers.map(u => ({
+//       name: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email,
+//       email: u.email,
+//       earnedCoins: 125 // Or use actual logic if stored per referral
+//     }));
 
 
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
+//     res.json({
+//       referralCode: user.referralCode,
+//       coins: user.coins,
+//       referralCount: user.referralCount,
+//       referredUsers: referredList
+//     });
+
+
+//   } catch (error) {
+//     console.error(error);
+//     res.status(500).json({ message: 'Server error' });
+//   }
+// });
 // GET all services
 app.get('/api/services', async (req, res) => {
   try {
@@ -2184,7 +3613,103 @@ app.get('/api/enrollments/user/:userId', async (req, res) => {
     });
   }
 });
+app.delete('/api/cart/remove', async (req, res) => {
+  try {
+    const { userId, productId } = req.body;
 
+    // Validate input
+    if (!userId || !productId) {
+      return res.status(400).json({
+        success: false,
+        message: 'User ID and Product ID are required'
+      });
+    }
+
+    // Find the cart
+    const cart = await Cart.findOne({ userId });
+
+    if (!cart) {
+      return res.status(404).json({
+        success: false,
+        message: 'Cart not found'
+      });
+    }
+
+    // Check if product exists in cart
+    const productIndex = cart.products.findIndex(
+      item => item.productId.toString() === productId
+    );
+
+    if (productIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found in cart'
+      });
+    }
+
+    // Remove the product
+    cart.products.splice(productIndex, 1);
+
+    // Save the updated cart
+    await cart.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Product removed from cart',
+      products: cart.products,
+      totalItems: cart.totalItems,
+      totalPrice: cart.totalPrice
+    });
+
+  } catch (error) {
+    console.error('Remove from cart error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while removing item from cart'
+    });
+  }
+});
+
+// API 2: Clear Entire Cart
+app.delete('/api/cart/clear', async (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    // Validate input
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'User ID is required'
+      });
+    }
+
+    // Find and update the cart
+    const cart = await Cart.findOneAndUpdate(
+      { userId },
+      { 
+        products: [],
+        totalItems: 0,
+        totalPrice: 0
+      },
+      { new: true, upsert: true }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'Cart cleared successfully',
+      products: [],
+      totalItems: 0,
+      totalPrice: 0
+    });
+
+  } catch (error) {
+    console.error('Clear cart error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while clearing cart'
+    });
+  }
+});
 // Update enrollment progress
 app.patch('/api/enrollments/:id/progress', async (req, res) => {
   try {
