@@ -2366,34 +2366,51 @@ res.json(cart);
     res.status(500).json({ error: err.message });
   }
 });
-
-// Update quantity of a product in cart
-// Update product quantity in cart
-app.put("/api/cart/update/:userId/:productId/:quantity", async (req, res) => {
-  const { userId, productId, quantity } = req.params;
-
-  if (!userId) return res.status(400).json({ error: "userId is required" });
-  if (!productId) return res.status(400).json({ error: "productId is required" });
-  if (!quantity || Number(quantity) < 1)
-    return res.status(400).json({ error: "quantity must be at least 1" });
-
+app.put("/api/cart/update", async (req, res) => {
   try {
+    const { userId, productId, quantity } = req.body;
+
+    if (!userId || !productId)
+      return res.status(400).json({ error: "Missing fields" });
+
     let cart = await Cart.findOne({ userId });
     if (!cart) return res.status(404).json({ error: "Cart not found" });
 
-    const item = cart.items.find(
-      (item) => item.productId.toString() === productId.toString()
+    // IMPORTANT: use products, not items
+    const index = cart.products.findIndex(
+      (p) => p.productId.toString() === productId.toString()
     );
-    if (!item) return res.status(404).json({ error: "Product not found in cart" });
 
-    item.quantity = Number(quantity);
+    if (index === -1)
+      return res.status(404).json({ error: "Product not found in cart" });
+
+    // Remove product if quantity = 0
+    if (Number(quantity) <= 0) {
+      cart.products.splice(index, 1);
+    } else {
+      cart.products[index].quantity = Number(quantity);
+    }
+
+    // Recalculate total
+    cart.totalAmount = cart.products.reduce(
+      (sum, p) => sum + p.price * p.quantity,
+      0
+    );
+
     await cart.save();
-    res.json(cart);
+
+    res.json({
+      success: true,
+      products: cart.products,
+      totalAmount: cart.totalAmount
+    });
   } catch (err) {
     console.error("Cart update error:", err);
     res.status(500).json({ error: err.message });
   }
 });
+
+
 // Remove from cart (DELETE /api/cart/remove/:userId/:productId)
 app.delete("/api/cart/remove/:userId/:productId", async (req, res) => {
   const { userId, productId } = req.params;
@@ -3231,21 +3248,128 @@ app.get('/api/courses/:id', async (req, res) => {
   }
 });
 
-// @route   POST /api/courses
-// @desc    Create a new course
-// @access  Public (should be Private/Admin in production)
-app.post('/api/courses', async (req, res) => {
+const handleImageUpload = (req, res, next) => {
+  // If no file is uploaded, continue with the request
+  if (!req.file) {
+    return next();
+  }
+  
+  // Create public URL for the uploaded file
+  req.body.image = `${req.protocol}://${req.get('host')}/uploads/courses/${req.file.filename}`;
+  next();
+};
+
+// Create course with image upload
+app.post('/api/courses', parser.single('image'), handleImageUpload, async (req, res) => {
   try {
     const courseData = req.body;
     
     // Validate required fields
-    if (!courseData.name || !courseData.description || !courseData.category || !courseData.price || !courseData.duration) {
+    const requiredFields = ['name', 'description', 'category', 'price', 'duration'];
+    const missingFields = requiredFields.filter(field => !courseData[field] || courseData[field].toString().trim() === '');
+    
+    if (missingFields.length > 0) {
       return res.status(400).json({
         success: false,
-        message: 'Missing required fields: name, description, category, price, duration'
+        message: `Missing required fields: ${missingFields.join(', ')}`
       });
     }
+
+    // Validate price is a number
+    if (isNaN(parseFloat(courseData.price)) || parseFloat(courseData.price) < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Price must be a valid positive number'
+      });
+    }
+
+    // Set default image if not provided
+    if (!courseData.image) {
+      courseData.image = 'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?w=500&auto=format&fit=crop&q=60';
+    }
+
+    // Parse and validate rating
+    if (courseData.rating) {
+      const rating = parseFloat(courseData.rating);
+      if (isNaN(rating) || rating < 0 || rating > 5) {
+        courseData.rating = 4.5;
+      } else {
+        courseData.rating = rating;
+      }
+    } else {
+      courseData.rating = 4.5;
+    }
+
+    // Parse and validate level
+    const validLevels = ['Beginner', 'Intermediate', 'Advanced'];
+    if (!courseData.level || !validLevels.includes(courseData.level)) {
+      courseData.level = 'Beginner';
+    }
+
+    // Parse and validate students count
+    if (!courseData.students || isNaN(parseInt(courseData.students))) {
+      courseData.students = 0;
+    } else {
+      courseData.students = parseInt(courseData.students);
+    }
+
+    // Parse instructor
+    if (courseData.instructor) {
+      try {
+        // If instructor is a string, convert to object
+        if (typeof courseData.instructor === 'string') {
+          courseData.instructor = {
+            name: courseData.instructor.trim() || 'Expert Instructor',
+            bio: courseData.instructorBio || '',
+            experience: courseData.instructorExperience || ''
+          };
+        }
+      } catch (error) {
+        courseData.instructor = {
+          name: 'Expert Instructor',
+          bio: '',
+          experience: ''
+        };
+      }
+    } else {
+      courseData.instructor = {
+        name: 'Expert Instructor',
+        bio: '',
+        experience: ''
+      };
+    }
+
+    // Parse arrays from comma-separated strings
+    if (courseData.whatYouWillLearn) {
+      if (typeof courseData.whatYouWillLearn === 'string') {
+        courseData.whatYouWillLearn = courseData.whatYouWillLearn
+          .split(',')
+          .map(item => item.trim())
+          .filter(item => item.length > 0);
+      }
+    } else {
+      courseData.whatYouWillLearn = [];
+    }
+
+    if (courseData.prerequisites) {
+      if (typeof courseData.prerequisites === 'string') {
+        courseData.prerequisites = courseData.prerequisites
+          .split(',')
+          .map(item => item.trim())
+          .filter(item => item.length > 0);
+      }
+    } else {
+      courseData.prerequisites = [];
+    }
+
+    // Set default values for optional fields
+    courseData.isActive = courseData.isActive !== undefined ? Boolean(courseData.isActive) : true;
+    courseData.certificate = courseData.certificate !== undefined ? Boolean(courseData.certificate) : true;
     
+    // Parse price to number
+    courseData.price = parseFloat(courseData.price);
+
+    // Create the course
     const course = new Course(courseData);
     const savedCourse = await course.save();
     
@@ -3256,17 +3380,182 @@ app.post('/api/courses', async (req, res) => {
     });
   } catch (error) {
     console.error('Error creating course:', error);
-    res.status(400).json({ 
+    
+    // Clean up uploaded file if there was an error
+    if (req.file) {
+      const filePath = path.join('uploads/courses', req.file.filename);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+    
+    // Handle validation errors
+    if (error.name === 'ValidationError') {
+      const errors = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({
+        success: false,
+        message: 'Validation error',
+        errors: errors
+      });
+    }
+    
+    // Handle duplicate key errors
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Course with this name already exists'
+      });
+    }
+    
+    res.status(500).json({ 
       success: false,
       message: 'Error creating course', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
     });
   }
 });
 
-// @route   PUT /api/courses/:id
-// @desc    Update a course
-// @access  Public (should be Private/Admin in production)
+// Separate endpoint for image upload only (for frontend to use)
+app.post('/api/courses/upload-image', parser.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No image file provided'
+      });
+    }
+    
+    const imageUrl = `${req.protocol}://${req.get('host')}/uploads/courses/${req.file.filename}`;
+    
+    res.status(200).json({
+      success: true,
+      message: 'Image uploaded successfully',
+      imageUrl: imageUrl,
+      filename: req.file.filename
+    });
+  } catch (error) {
+    console.error('Error uploading image:', error);
+    
+    // Clean up uploaded file if there was an error
+    if (req.file) {
+      const filePath = path.join('uploads/courses', req.file.filename);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: 'Error uploading image',
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
+  }
+});
+
+// Serve uploaded files statically
+app.use('/uploads/courses', express.static('uploads/courses'));
+
+// Update course endpoint (with image upload)
+app.put('/api/courses/:id', parser.single('image'), handleImageUpload, async (req, res) => {
+  try {
+    const courseId = req.params.id;
+    const updates = req.body;
+    
+    // Find existing course
+    const existingCourse = await Course.findById(courseId);
+    if (!existingCourse) {
+      return res.status(404).json({
+        success: false,
+        message: 'Course not found'
+      });
+    }
+    
+    // If new image is uploaded, delete old image file
+    if (req.file && existingCourse.image && existingCourse.image.includes('/uploads/courses/')) {
+      const oldFilename = existingCourse.image.split('/').pop();
+      const oldFilePath = path.join('uploads/courses', oldFilename);
+      if (fs.existsSync(oldFilePath)) {
+        fs.unlinkSync(oldFilePath);
+      }
+    }
+    
+    // Update course data
+    Object.keys(updates).forEach(key => {
+      if (key !== 'image' || req.file) { // Don't update image unless new file uploaded
+        existingCourse[key] = updates[key];
+      }
+    });
+    
+    // If new image uploaded, update image URL
+    if (req.file) {
+      existingCourse.image = req.body.image;
+    }
+    
+    const updatedCourse = await existingCourse.save();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Course updated successfully',
+      data: updatedCourse
+    });
+  } catch (error) {
+    console.error('Error updating course:', error);
+    
+    // Clean up uploaded file if there was an error
+    if (req.file) {
+      const filePath = path.join('uploads/courses', req.file.filename);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+    
+    res.status(400).json({
+      success: false,
+      message: 'Error updating course',
+      error: error.message
+    });
+  }
+});
+
+// Delete course endpoint (with image cleanup)
+app.delete('/api/courses/:id', async (req, res) => {
+  try {
+    const courseId = req.params.id;
+    const course = await Course.findById(courseId);
+    
+    if (!course) {
+      return res.status(404).json({
+        success: false,
+        message: 'Course not found'
+      });
+    }
+    
+    // Delete associated image file if exists
+    if (course.image && course.image.includes('/uploads/courses/')) {
+      const filename = course.image.split('/').pop();
+      const filePath = path.join('uploads/courses', filename);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+    
+    await Course.findByIdAndDelete(courseId);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Course deleted successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting course:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting course',
+      error: error.message
+    });
+  }
+});
+
+
 app.put('/api/courses/:id', async (req, res) => {
   try {
     const course = await Course.findByIdAndUpdate(
@@ -3502,40 +3791,289 @@ const enrollmentSchema = new mongoose.Schema({
   courseCategory: String,
   courseDuration: String,
   courseImage: String,
+
   enrollmentDate: {
     type: Date,
     default: Date.now
   },
+
   paymentStatus: {
     type: String,
     enum: ['pending', 'completed', 'failed'],
     default: 'pending'
   },
+
   progress: {
     type: Number,
     default: 0,
     min: 0,
     max: 100
   },
+
   status: {
     type: String,
     enum: ['active', 'completed', 'cancelled'],
     default: 'active'
   },
+
   completedLessons: [{
     lessonId: String,
     completedAt: Date
   }],
+
   certificateIssued: {
     type: Boolean,
     default: false
   },
+
   certificateUrl: String
-}, {
-  timestamps: true
+
+}, { timestamps: true });
+
+const Enrollment = mongoose.model("Enrollment", enrollmentSchema);
+
+
+
+// =============================
+// 📌 Enrollment APIs
+// =============================
+
+
+// 1️⃣ Get all enrollments
+app.get("/api/enrollments", async (req, res) => {
+  try {
+    const enrollments = await Enrollment.find().sort({ createdAt: -1 });
+    res.json(enrollments);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch enrollments" });
+  }
 });
 
-const Enrollment = mongoose.model('Enrollment', enrollmentSchema);
+
+// 2️⃣ Get enrollment by ID
+app.get("/api/enrollments/:id", async (req, res) => {
+  try {
+    const enrollment = await Enrollment.findById(req.params.id);
+
+    if (!enrollment) {
+      return res.status(404).json({ message: "Enrollment not found" });
+    }
+
+    res.json(enrollment);
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch enrollment" });
+  }
+});
+
+
+// 3️⃣ Update enrollment status
+app.put("/api/enrollments/:id/status", async (req, res) => {
+  try {
+    const { status } = req.body;
+
+    const enrollment = await Enrollment.findById(req.params.id);
+    if (!enrollment) {
+      return res.status(404).json({ message: "Enrollment not found" });
+    }
+
+    enrollment.status = status;
+
+    // If completed, auto set progress to 100
+    if (status === "completed") {
+      enrollment.progress = 100;
+    }
+
+    await enrollment.save();
+
+    res.json({
+      message: "Enrollment status updated",
+      enrollment
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update status" });
+  }
+});
+
+
+// 4️⃣ Update payment status
+app.put("/api/enrollments/:id/payment", async (req, res) => {
+  try {
+    const { paymentStatus } = req.body;
+
+    const enrollment = await Enrollment.findById(req.params.id);
+    if (!enrollment) {
+      return res.status(404).json({ message: "Enrollment not found" });
+    }
+
+    enrollment.paymentStatus = paymentStatus;
+    await enrollment.save();
+
+    res.json({
+      message: "Payment status updated",
+      enrollment
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update payment" });
+  }
+});
+
+
+// 5️⃣ Issue certificate
+app.put("/api/enrollments/:id/certificate", async (req, res) => {
+  try {
+    const { certificateUrl } = req.body;
+
+    const enrollment = await Enrollment.findById(req.params.id);
+    if (!enrollment) {
+      return res.status(404).json({ message: "Enrollment not found" });
+    }
+
+    if (enrollment.progress < 100 || enrollment.status !== "completed") {
+      return res.status(400).json({
+        message: "Course not completed yet"
+      });
+    }
+
+    enrollment.certificateIssued = true;
+    enrollment.certificateUrl = certificateUrl;
+
+    await enrollment.save();
+
+    res.json({
+      message: "Certificate issued",
+      enrollment
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to issue certificate" });
+  }
+});
+app.get("/api/dashboard/metrics", async (req, res) => {
+  try {
+    const totalUsers = await mongoose.connection.db.collection("users").countDocuments();
+    const totalBookings = await mongoose.connection.db.collection("orders").countDocuments();
+
+    const revenueAgg = await mongoose.connection.db.collection("orders").aggregate([
+      { $match: { paymentStatus: "completed" } },
+      { $group: { _id: null, total: { $sum: "$amount" } } }
+    ]).toArray();
+
+    const totalEarnings = revenueAgg[0]?.total || 0;
+
+    const pendingRequests = await mongoose.connection.db.collection("orders").countDocuments({
+      status: "pending"
+    });
+
+    res.json({
+      success: true,
+      data: {
+        totalUsers,
+        totalBookings,
+        totalEarnings,
+        pendingRequests,
+
+        // For now static growth – you can make this dynamic later
+        userGrowthPercentage: 12,
+        bookingGrowthPercentage: 8,
+        earningsGrowthPercentage: 15,
+        pendingRequestsChangePercentage: -5
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: "Dashboard metrics failed" });
+  }
+});
+app.get("/api/dashboard/revenue", async (req, res) => {
+  try {
+    const revenue = await mongoose.connection.db.collection("orders").aggregate([
+      {
+        $match: { paymentStatus: "completed" }
+      },
+      {
+        $group: {
+          _id: { $month: "$createdAt" },
+          total: { $sum: "$amount" }
+        }
+      },
+      { $sort: { "_id": 1 } }
+    ]).toArray();
+
+    const formatted = revenue.map(r => ({
+      month: new Date(2025, r._id - 1).toLocaleString("default", { month: "short" }),
+      revenue: r.total
+    }));
+
+    res.json({ success: true, data: formatted });
+  } catch (err) {
+    res.status(500).json({ success: false });
+  }
+});
+app.get("/api/dashboard/service-distribution", async (req, res) => {
+  try {
+    const data = await mongoose.connection.db.collection("orders").aggregate([
+      {
+        $group: {
+          _id: "$serviceCategory",
+          value: { $sum: 1 }
+        }
+      }
+    ]).toArray();
+
+    const formatted = data.map(d => ({
+      name: d._id,
+      value: d.value
+    }));
+
+    res.json({ success: true, data: formatted });
+  } catch (err) {
+    res.status(500).json({ success: false });
+  }
+});
+app.get("/api/dashboard/activities", async (req, res) => {
+  try {
+    const activities = await mongoose.connection.db.collection("orders")
+      .find()
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .toArray();
+
+    const formatted = activities.map(a => ({
+      title: "New Booking",
+      description: `${a.userName} booked ${a.serviceName}`,
+      time: new Date(a.createdAt).toLocaleString()
+    }));
+
+    res.json({ success: true, data: formatted });
+  } catch (err) {
+    res.status(500).json({ success: false });
+  }
+});
+app.get("/api/dashboard/top-services", async (req, res) => {
+  try {
+    const data = await mongoose.connection.db.collection("orders").aggregate([
+      {
+        $group: {
+          _id: "$serviceName",
+          bookings: { $sum: 1 },
+          revenue: { $sum: "$amount" },
+          avgRating: { $avg: "$rating" }
+        }
+      },
+      { $sort: { revenue: -1 } },
+      { $limit: 5 }
+    ]).toArray();
+
+    const formatted = data.map(s => ({
+      service: s._id,
+      bookings: s.bookings,
+      revenue: s.revenue,
+      rating: Number(s.avgRating?.toFixed(1)) || 0
+    }));
+
+    res.json({ success: true, data: formatted });
+  } catch (err) {
+    res.status(500).json({ success: false });
+  }
+});
 
 // ==================== ENROLLMENT ROUTES ====================
 
